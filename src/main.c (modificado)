@@ -1,0 +1,200 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include "fila.h"
+#include "types.h"
+#include "parsing.h"
+
+#define QUANTUM_TEMPO 1
+const char* stringsIO[] = {"DISCO", "FITA", "IMPRESSORA"};
+
+
+int getTempoDeChegada(ProcessDescriptor* listaProcessos, int tam, int pos) {
+    if (pos >= tam) {
+        perror("Erro de index");
+        exit(1);
+    }
+
+    return listaProcessos[pos].tempoDeChegada;
+}
+
+PCB* getProximoProcesso(FILA* altaPrioridade, FILA* baixaPrioridade) {
+    PCB* processo = malloc(sizeof(PCB));
+    if (!processo) {
+        perror("Erro alocando memoria para o processo");
+        exit(1);
+    }
+
+    if (dequeue(altaPrioridade, processo)) {
+        return processo;
+    }
+
+    if (dequeue(baixaPrioridade, processo)) {
+        return processo;
+    }
+
+    free(processo);
+    return NULL;
+}
+
+
+int main(int c, char** argv) {
+    int tempo = 0;
+    int quantum = QUANTUM_TEMPO;
+    char bufferProcessos[BUFFER_SIZE];
+    char* arquivoEntrada = "processos_entrada.csv";
+    FILA baixaPrioridade;
+    FILA altaPrioridade;
+    FILA IOs;
+    ProcessDescriptor entradaProcessos[MAX_PROCESSOS];
+    PCB* processoEmExecucao = NULL;
+    
+    FILE* entrada = fopen(arquivoEntrada, "r");
+    if (!entrada) {
+        perror("fopen");
+        exit(1);
+    }
+
+    inicializaFila(&altaPrioridade);
+    inicializaFila(&baixaPrioridade);
+    inicializaFila(&IOs);       
+
+    // Pulando o cabeçalho
+    fgets(bufferProcessos, BUFFER_SIZE, entrada);
+    fgets(bufferProcessos, BUFFER_SIZE, entrada);
+    
+
+    // Lendo os processos de entrada
+    int cont = 0;
+    while (cont < MAX_PROCESSOS && fgets(bufferProcessos, BUFFER_SIZE, entrada)) {
+        entradaProcessos[cont] = parseProcessos(bufferProcessos);
+        cont++;    
+    }
+
+
+    // Loop principal
+    int indice = 0;
+    while (processoEmExecucao ||
+           indice < cont ||
+           !vazioFila(baixaPrioridade) ||
+           !vazioFila(altaPrioridade) ||
+           !vazioFila(IOs)) {
+
+        
+        // 1) Ainda há processo a serem criados
+        bool processoCriado = true;
+        while (processoCriado) {
+            processoCriado = false;
+            if (indice < cont) {
+                if (tempo >= getTempoDeChegada(entradaProcessos, cont, indice)) {
+                    PCB novoProcesso = criandoProcesso(entradaProcessos[indice]);                 
+                    printf("Processo p%d criado no instante: %d\n", novoProcesso.PID, tempo);    
+                    enqueue(&altaPrioridade, novoProcesso);
+                    indice++;
+                    processoCriado = true;
+                }
+            }
+        }
+
+        // Processo finalizado
+        if (processoEmExecucao && processoEmExecucao->tempoServico <= 0) {
+            printf("Processo p%d terminado no instante: %d\n", processoEmExecucao->PID, tempo);
+            free(processoEmExecucao);
+            processoEmExecucao = NULL; // Adicionar algo mais? Aqui que eu devo dar free no no de PCB?
+        }
+
+        // 2) Verificar retornos de I/O 
+        if(!vazioFila(IOs)) {
+            printf("Em seguida vem a fila...");  
+            printFila(IOs);                 
+            int tamanho = tamanhoFila(IOs);
+            printf("Tamanho da fila ios = %d", tamanho);
+            for(int i = 0; i<tamanho; i++) {
+                PCB* ProcessoTemporario = malloc(sizeof(PCB));
+                dequeue(&IOs, ProcessoTemporario);
+                if(ProcessoTemporario->tempoRetornoIOs == tempo) {
+                    ProcessoTemporario->status = PRONTO;
+                    enqueue(&altaPrioridade, *ProcessoTemporario);
+                    printf("Processo p%d saiu do IO no instante: %d\n", ProcessoTemporario->PID, tempo);
+                }
+                else {
+                    enqueue(&IOs, *ProcessoTemporario);
+                }
+            }
+        }
+        
+        // 3) Retornar processo executado para a fila de baixa prioridade - Preempcao
+        if (processoEmExecucao) {
+            processoEmExecucao->status = PRONTO;
+            enqueue(&baixaPrioridade, *processoEmExecucao);
+        }
+        if(processoEmExecucao && processoEmExecucao->contIOs > processoEmExecucao->proxIOs && processoEmExecucao->temposIOs[processoEmExecucao->proxIOs] == tempo) {
+                processoEmExecucao->status = BLOQUEADO;
+                enqueue(&IOs, *processoEmExecucao);
+                processoEmExecucao->tempoRetornoIOs = tempo+processoEmExecucao->temposIOs[processoEmExecucao->proxIOs];
+                printf("Tempo de retorno = %d", processoEmExecucao->tempoRetornoIOs);
+                processoEmExecucao->proxIOs += 1;
+                processoEmExecucao = NULL; 
+            }
+
+            // Executando o proximo processo
+            processoEmExecucao = getProximoProcesso(&altaPrioridade, &baixaPrioridade);
+            if (processoEmExecucao) { 
+                printf("ContIOs = %d", processoEmExecucao->contIOs);
+                printf("prox = %d", processoEmExecucao->proxIOs);
+                printf("tempo = %d", tempo);
+                printf("teste = %d", processoEmExecucao->temposIOs[processoEmExecucao->proxIOs]);
+                printf("Tamanho da fila de IOS = %d", tamanhoFila(IOs));
+            // Processo bloqueado 
+            /*int tamanhoAlta = tamanhoFila(altaPrioridade);
+            for(int i = 0; i<tamanhoAlta;i++) {
+                PCB *temporario = NULL;
+                dequeue(&altaPrioridade, temporario);
+                if(temporario->contIOs > temporario->proxIOs && temporario->temposIOs[temporario->proxIOs] == tempo) {
+                    temporario->status = BLOQUEADO;
+                    enqueue(&IOs, *temporario);
+                    temporario->tempoRetornoIOs = tempo + temporario->temposIOs[temporario->proxIOs];
+                    temporario->proxIOs += 1;
+                    temporario = NULL;
+                }
+                enqueue(&altaPrioridade, *temporario);
+            }
+*/
+/*            int tamanhoBaixa = tamanhoFila(baixaPrioridade);
+            for(int i = 0; i<tamanhoBaixa;i++) {
+                PCB *temporario = NULL;
+                dequeue(&baixaPrioridade, temporario);
+                printf("%d", 65524324234124);
+                if(temporario->contIOs > temporario->proxIOs && temporario->temposIOs[temporario->proxIOs] == tempo) {
+                    temporario->status = BLOQUEADO;
+                    enqueue(&IOs, *temporario);
+                    temporario->tempoRetornoIOs = tempo + temporario->temposIOs[temporario->proxIOs];
+                    temporario->proxIOs += 1;
+                    temporario = NULL;
+                }
+                enqueue(&baixaPrioridade, *temporario);
+            }
+
+ */           
+               // processoEmExecucao = getProximoProcesso(&altaPrioridade, &baixaPrioridade);
+
+            // if (Tempo de bloqueio == tempo)
+            // manda pra fila de IOs
+            // else
+            processoEmExecucao->status = EXECUTANDO;
+            processoEmExecucao->tempoServico -= quantum;
+            printf("Processo p%d executado no instante: %d --- Tempo de servico: %d\n", processoEmExecucao->PID, tempo, processoEmExecucao->tempoServico);
+
+            // printf("Tamanho da fila %d de IO", tamanhoFila(IOs));
+            printf("Hello World");     
+        
+        }
+            printf("Ruan");
+        // Incrementar o tempo
+        tempo += quantum;
+      
+    }
+    fclose(entrada);
+    return 0;
+}
+
+
